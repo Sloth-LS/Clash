@@ -16,6 +16,7 @@ CAPITAL_SPACING = 120 # how far apart (in pixels) capitals try to be
 CAMERA_SPEED = 10     # pixels the camera moves each frame while you hold a key
 ZOOM_STEP = 1.2       # how much one click on the mouse wheel zooms
 MAX_ZOOM = 5          # how far in you can zoom
+SPAWN_TIME = 10       # seconds you have to move your start after your first pick
 
 # --- Hexagon measurements ---
 HEX_WIDTH = math.sqrt(3) * HEX_RADIUS   # width of one hexagon
@@ -211,6 +212,7 @@ def make_nations(tiles, robot_count):
     for i, capital in enumerate(capitals):
         if i == 0:
             name = "You"
+            capital = None  # you pick your own start spot
         else:
             name = f"Robot {i}"
         nations.append({
@@ -226,6 +228,8 @@ def make_nations(tiles, robot_count):
 
 def draw_nations(screen, nations, font, camera):
     for nation in nations:
+        if nation["capital"] is None:
+            continue
         x, y = nation["capital"]
         center_x, center_y = map_to_screen(hex_center(x, y), camera)
         name = font.render(nation["name"], True, MENU_TEXT_COLOR)
@@ -247,19 +251,59 @@ def paint_tile(map_image, tile, nation):
     pygame.draw.polygon(map_image, nation["edge_color"], corners, 1)
 
 
+def claim_start_land(tiles, owners, nations, i, map_image):
+    # Nation number i gets its capital and the free land right around it.
+    nation = nations[i]
+    x, y = nation["capital"]
+    start_tiles = [(x, y)] + neighbors_of(x, y)
+    for tx, ty in start_tiles:
+        if tiles[ty][tx] == LAND and owners[ty][tx] is None:
+            owners[ty][tx] = i
+            nation["land"].add((tx, ty))
+            paint_tile(map_image, (tx, ty), nation)
+
+
 def give_start_land(tiles, nations, map_image):
-    # Every nation starts with its capital and the land right around it.
+    # Every robot starts with its capital and the land right around it.
+    # You don't have a capital yet, because you pick your own spot.
     # Returns a grid that says which nation owns each tile (None means nobody).
     owners = [[None] * MAP_WIDTH for _ in range(MAP_HEIGHT)]
     for i, nation in enumerate(nations):
-        x, y = nation["capital"]
-        start_tiles = [(x, y)] + neighbors_of(x, y)
-        for tx, ty in start_tiles:
-            if tiles[ty][tx] == LAND and owners[ty][tx] is None:
-                owners[ty][tx] = i
-                nation["land"].add((tx, ty))
-                paint_tile(map_image, (tx, ty), nation)
+        if nation["capital"] is not None:
+            claim_start_land(tiles, owners, nations, i, map_image)
     return owners
+
+
+def choose_start(tiles, owners, nations, tile, map_image):
+    # Moves your start to the tile you clicked. Returns False if you can't start there.
+    x, y = tile
+    if tiles[y][x] != LAND or owners[y][x] not in (None, 0):
+        return False
+    you = nations[0]
+    # Give back the land from your last pick, so it turns green again.
+    for old_x, old_y in you["land"]:
+        owners[old_y][old_x] = None
+        corners = hex_corners(old_x, old_y)
+        pygame.draw.polygon(map_image, LAND_COLOR, corners)
+        pygame.draw.polygon(map_image, LAND_EDGE_COLOR, corners, 1)
+    you["land"] = set()
+    you["capital"] = tile
+    claim_start_land(tiles, owners, nations, 0, map_image)
+    return True
+
+
+def draw_spawn_message(screen, font, spawn_timer):
+    if spawn_timer is None:
+        text = "Click on land to choose where you start"
+    elif spawn_timer > 0:
+        text = f"Starting in {math.ceil(spawn_timer)}... click again to move"
+    else:
+        return
+    message = font.render(text, True, MENU_TEXT_COLOR)
+    shadow = font.render(text, True, (0, 0, 0))
+    message_pos = message.get_rect(center=(SCREEN_WIDTH // 2, 30))
+    screen.blit(shadow, message_pos.move(2, 2))
+    screen.blit(message, message_pos)
 
 
 def screen_to_map(pos, camera):
@@ -372,6 +416,7 @@ def main():
     pygame.display.set_caption("Clash")
     clock = pygame.time.Clock()
     name_font = pygame.font.SysFont(None, 22)
+    message_font = pygame.font.SysFont(None, 36)
 
     robot_count = start_screen(screen, clock)
     if robot_count is None:
@@ -384,6 +429,7 @@ def main():
     owners = give_start_land(tiles, nations, map_image)
     selected = None
     camera = {"x": 0, "y": 0, "zoom": 1}
+    spawn_timer = None  # None until you pick a start spot, then it counts down
 
     running = True
     while running:
@@ -397,6 +443,7 @@ def main():
                     nations = make_nations(tiles, robot_count)
                     owners = give_start_land(tiles, nations, map_image)
                     selected = None
+                    spawn_timer = None
                 elif event.key == pygame.K_ESCAPE:
                     running = False
             elif event.type == pygame.MOUSEWHEEL:
@@ -404,11 +451,10 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 map_x, map_y = screen_to_map(event.pos, camera)
                 selected = pixel_to_hex(map_x, map_y)
-                x, y = selected
-                if tiles[y][x] == LAND:
-                    print(f"Tile ({x}, {y}): land")
-                else:
-                    print(f"Tile ({x}, {y}): water")
+                if spawn_timer is None or spawn_timer > 0:
+                    if choose_start(tiles, owners, nations, selected, map_image):
+                        if spawn_timer is None:
+                            spawn_timer = SPAWN_TIME
 
         move_camera(camera)
         draw_view(screen, map_image, camera)
@@ -417,8 +463,11 @@ def main():
             x, y = selected
             corners = [map_to_screen(corner, camera) for corner in hex_corners(x, y)]
             pygame.draw.polygon(screen, SELECTED_COLOR, corners, 2)
+        draw_spawn_message(screen, message_font, spawn_timer)
         pygame.display.flip()
-        clock.tick(60)
+        seconds = clock.tick(60) / 1000
+        if spawn_timer is not None and spawn_timer > 0:
+            spawn_timer -= seconds
 
     pygame.quit()
 
